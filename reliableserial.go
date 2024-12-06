@@ -47,12 +47,12 @@ type ReliableSerial struct {
 	serialPort io.ReadWriteCloser
 
 	// Internal synchronization
-	mu               sync.Mutex
-	isRunning        bool
-	ctx              context.Context
-	cancel           context.CancelFunc
-	deviceCancel     context.CancelFunc
-	deviceCancelOnce sync.Once
+	mu           sync.Mutex
+	isRunning    bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	deviceCancel context.CancelFunc
+	// deviceCancelOnce sync.Once
 
 	receiveBuffer       []byte
 	delimiter           byte
@@ -72,8 +72,8 @@ func NewReliableSerial(
 ) *ReliableSerial {
 	ctx, cancel := context.WithCancel(context.Background())
 	rs := &ReliableSerial{
-		sendCh:    make(chan Serializable),
-		receiveCh: make(chan Serializable),
+		sendCh:    make(chan Serializable, 64),
+		receiveCh: make(chan Serializable, 64),
 
 		deviceMatcher: deviceMatcher,
 		serialConfig:  serialConfig,
@@ -201,7 +201,7 @@ func (rs *ReliableSerial) handleDeviceConnection(deviceInfo DeviceInfo) {
 	// Create a child context that can be canceled when the device disconnects
 	deviceCtx, deviceCancel := context.WithCancel(rs.ctx)
 	rs.deviceCancel = deviceCancel
-	rs.deviceCancelOnce = sync.Once{}
+	// rs.deviceCancelOnce = sync.Once{}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -226,7 +226,7 @@ func (rs *ReliableSerial) handleDeviceConnection(deviceInfo DeviceInfo) {
 	rs.mu.Unlock()
 
 	rs.deviceCancel = nil
-	rs.deviceCancelOnce = sync.Once{}
+	// rs.deviceCancelOnce = sync.Once{}
 
 	rs.serialPort.Close()
 	rs.serialPort = nil
@@ -253,7 +253,11 @@ func (rs *ReliableSerial) sendLoop(ctx context.Context) {
 			_, err = rs.serialPort.Write(serializedData)
 			if err != nil {
 				rs.logger.Error("Failed to write to serial port", "error", err)
-				rs.deviceCancelOnce.Do(rs.deviceCancel)
+				// rs.deviceCancelOnce.Do(rs.deviceCancel)
+				if rs.deviceCancel != nil {
+					rs.deviceCancel()
+					rs.deviceCancel = nil
+				}
 				return
 			}
 		}
@@ -271,7 +275,11 @@ func (rs *ReliableSerial) receiveLoop(ctx context.Context) {
 			n, err := rs.serialPort.Read(buffer)
 			if err != nil {
 				rs.logger.Error("Failed to read from serial port", "error", err)
-				rs.deviceCancelOnce.Do(rs.deviceCancel)
+				// rs.deviceCancelOnce.Do(rs.deviceCancel)
+				if rs.deviceCancel != nil {
+					rs.deviceCancel()
+					rs.deviceCancel = nil
+				}
 				return
 			}
 			if n > 0 {
@@ -282,17 +290,31 @@ func (rs *ReliableSerial) receiveLoop(ctx context.Context) {
 	}
 }
 
+const maxReceiveBufferSize = 1024 * 1024
+
 // handleReceivedData processes incoming data and deserializes complete messages.
 func (rs *ReliableSerial) handleReceivedData(data []byte) {
 	rs.mu.Lock()
 	rs.receiveBuffer = append(rs.receiveBuffer, data...)
+	if len(rs.receiveBuffer) > maxReceiveBufferSize {
+		rs.logger.Warn("Receive buffer is full, clearing buffer")
+		rs.receiveBuffer = nil
+		rs.mu.Unlock()
+		return
+	}
 	rs.mu.Unlock()
 
 	for {
 		rs.mu.Lock()
 		idx := bytes.IndexByte(rs.receiveBuffer, rs.delimiter)
 		if idx == -1 {
-			// No complete message yet
+			rs.mu.Unlock()
+			break
+		}
+
+		if idx+1 > len(rs.receiveBuffer) {
+			rs.logger.Warn("Delimiter found at the end of buffer, clearing buffer")
+			rs.receiveBuffer = nil
 			rs.mu.Unlock()
 			break
 		}

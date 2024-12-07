@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/creack/goselect v0.1.2 // indirect
+	github.com/dikkadev/prettyslog v0.0.0-20241029122445-44f60ae978bd // indirect
 	golang.org/x/sys v0.0.0-20220829200755-d48e67d00261 // indirect
 )
